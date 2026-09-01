@@ -7,8 +7,8 @@ load_dotenv(BASE_DIR / ".env")
 
 class Config:
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    WHATSAPP_PHONE: str = os.getenv("WHATSAPP_PHONE_NUMBER", "")
     WHATSAPP_API_KEY: str = os.getenv("WHATSAPP_API_KEY", "")
+    WHATSAPP_PHONE_NUMBER: str = os.getenv("WHATSAPP_PHONE_NUMBER", "")
     
     # Analysis & Engine Parameters
     ROLLING_WINDOW_MINUTES: int = int(os.getenv("ROLLING_WINDOW_MINUTES", "60"))
