@@ -6,6 +6,7 @@ The system streams live tick feeds from major spot and perpetual derivatives exc
 
 ## System Architecture
 
+```
 [ Exchange WebSockets (Spot / Perp) ]
 │ (Live Trade Ticks)
 ▼
@@ -21,6 +22,7 @@ The system streams live tick feeds from major spot and perpetual derivatives exc
 │
 ▼
 [ Private Alert Dispatcher (WhatsApp / Webhook) ]
+```
 
 ## Core Features
 
