@@ -18,6 +18,9 @@ pandas = "*"
 python-dotenv = "*"
 requests = "*"
 
+[tool.poetry.scripts]
+btc-alert = "btc_alert.main:main"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
