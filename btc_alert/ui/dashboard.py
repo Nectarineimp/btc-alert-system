@@ -40,7 +40,7 @@ class DashboardUI:
                 f"[bold cyan]Regime:[/bold cyan] [{color}]{analysis.regime}[/{color}]  |  "
                 f"[bold cyan]Uncertainty:[/bold cyan] [{color}]{analysis.uncertainty_level}[/{color}]\n"
                 f"[bold white]{analysis.verbal_summary}[/bold white]\n"
-                f"[dim red]Primary Risk: {analysis.key_risk_factor}[/dim red]"
+                f"[yellow]Primary Risk: {analysis.key_risk_factor}[/yellow]"
             )
         else:
             narrative_body = "[dim yellow]Aggregating order flow... Awaiting initial Gemini synthesis.[/dim yellow]"
