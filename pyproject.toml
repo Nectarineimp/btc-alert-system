@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "btc-alert-system"
+version = "0.1.0"
+description = "Real-time Bitcoin microstructure analytics daemon with Gemini synthesis"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "btc_alert"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+google-genai = "*"
+pydantic = "*"
+rich = "*"
+websockets = "*"
+aiohttp = "*"
+numpy = "*"
+pandas = "*"
+python-dotenv = "*"
+requests = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
