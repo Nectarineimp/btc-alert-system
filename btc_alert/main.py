@@ -183,10 +183,10 @@ class BTCMicrostructureDaemon:
                     )
                 )
                 if now - self.last_snapshot_export >= 300:  # Every 5 minutes
-                self.last_snapshot_export = now
-                DashboardUI.export_snapshot(
-                    cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
-                )
+                    self.last_snapshot_export = now
+                    DashboardUI.export_snapshot(
+                        cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
+                    )
 
 def main():
     daemon = BTCMicrostructureDaemon()
