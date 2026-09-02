@@ -9,6 +9,7 @@ from btc_alert.analytics.cvd import RollingCVDTracker, CVDMetrics
 from btc_alert.analytics.volume_profile import RollingVolumeProfile, VolumeProfileMetrics
 from btc_alert.reasoning.gemini_engine import GeminiReasoningEngine
 from btc_alert.reasoning.schemas import MicrostructureAnalysis
+from btc_alert.reasoning.budget_manager import InferenceBudgetManager
 from btc_alert.alerts.whatsapp import WhatsAppNotifier
 from btc_alert.ui.dashboard import DashboardUI
 
@@ -16,6 +17,7 @@ logging.getLogger().setLevel(logging.CRITICAL)
 
 class BTCMicrostructureDaemon:
     def __init__(self):
+        self.last_snapshot_export: float = 0.0
         self.stream_client = MultiExchangeStreamClient()
         self.cvd_tracker = RollingCVDTracker(window_seconds=config.ROLLING_WINDOW_MINUTES * 60)
         self.vp_tracker = RollingVolumeProfile(
@@ -23,6 +25,7 @@ class BTCMicrostructureDaemon:
             bin_size=config.BIN_SIZE
         )
         self.reasoning_engine = GeminiReasoningEngine()
+        self.budget_mgr = InferenceBudgetManager(max_per_hour=30, max_per_day=500)
         self.notifier = WhatsAppNotifier()
         
         self.latest_analysis: MicrostructureAnalysis | None = None
@@ -33,12 +36,12 @@ class BTCMicrostructureDaemon:
         self.start_time: float = time.time()
         self.alert_status: str = "Accumulating order flow buffer..."
         
-        # High-Conviction Thresholds
-        self.inference_cooldown: int = 900     # 15 min between LLM queries
-        self.whatsapp_cooldown: int = 1800     # 30 min between phone pings
-        self.min_warmup_seconds: int = 300     # 5 min startup accumulation
-        self.min_volume_threshold: float = 100.0
-        self.min_cvd_divergence: float = 25.0
+        # High-Conviction Gating
+        self.inference_cooldown: int = 180      # 3 minutes between LLM inferences during breakouts
+        self.whatsapp_cooldown: int = 1200      # 20 minutes between phone notifications
+        self.min_warmup_seconds: int = 180      # 3 minutes warmup on startup
+        self.min_volume_threshold: float = 75.0 # Require 75 BTC traded in 60m window
+        self.min_cvd_divergence: float = 20.0   # Require 20 BTC delta divergence
 
     def _generate_rule_based_synthesis(
         self, cvd: CVDMetrics, vp: VolumeProfileMetrics
@@ -69,7 +72,7 @@ class BTCMicrostructureDaemon:
         )
 
     async def _format_and_dispatch_alert(self, cvd: CVDMetrics, vp: VolumeProfileMetrics, analysis: MicrostructureAnalysis):
-        """Constructs the high-conviction WhatsApp payload."""
+        """Constructs the high-conviction WhatsApp payload with verified float formatting."""
         msg = (
             f"⚡ *BTC ORDER FLOW BREAKOUT*\n\n"
             f"*Regime:* {analysis.regime}\n"
@@ -112,10 +115,12 @@ class BTCMicrostructureDaemon:
                     has_divergence = abs(cvd_metrics.cvd_divergence) >= self.min_cvd_divergence
                     cooldown_ready = (now - self.last_gemini_call) >= self.inference_cooldown
 
-                    # Trigger Gemini inference only under verified order flow displacement
-                    if is_outside_va and has_warmup and has_volume and has_divergence and cooldown_ready:
+                    budget_allowed, budget_msg = self.budget_mgr.can_call()
+
+                    # Only run inference if BOTH quantitative trigger and budget permit
+                    if is_outside_va and has_warmup and has_volume and has_divergence and cooldown_ready and budget_allowed:
                         self.last_gemini_call = now
-                        self.alert_status = "[bold yellow]Evaluating High-Conviction Breakout...[/bold yellow]"
+                        self.alert_status = f"[bold yellow]Evaluating Breakout... ({self.budget_mgr.get_status_str()})[/bold yellow]"
 
                         payload = {
                             "price": cvd_metrics.latest_price,
@@ -136,8 +141,9 @@ class BTCMicrostructureDaemon:
                             self.latest_analysis = await loop.run_in_executor(
                                 None, self.reasoning_engine.evaluate_market, payload
                             )
+                            # Record successful call in budget tracker
+                            self.budget_mgr.record_call()
 
-                            # Dispatch WhatsApp ping ONLY if uncertainty is Low and regime changed
                             if (
                                 self.latest_analysis.uncertainty_level == "Low"
                                 and (now - self.last_alert_sent >= self.whatsapp_cooldown)
@@ -146,22 +152,40 @@ class BTCMicrostructureDaemon:
                                 self.last_alert_sent = now
                                 self.last_alert_regime = self.latest_analysis.regime
                                 asyncio.create_task(self._format_and_dispatch_alert(cvd_metrics, vp_metrics, self.latest_analysis))
-                                self.alert_status = f"[bold green]WHATSAPP DISPATCHED ({self.latest_analysis.regime})[/bold green]"
+                                # Export snapshot to website repository folder
+                                DashboardUI.export_snapshot(
+                                    cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
+                                )
+                                self.alert_status = f"[bold green]ALERT DISPATCHED ({self.latest_analysis.regime})[/bold green]"
                             else:
-                                self.alert_status = f"Tracking ({self.latest_analysis.regime})"
+                                self.alert_status = f"Tracking ({self.latest_analysis.regime}) | {self.budget_mgr.get_status_str()}"
                         except Exception as exc:
-                            err_detail = getattr(exc, "code", None) or str(exc)[:30]
-                            self.alert_status = f"[red]Inference error: {err_detail}[/red]"
+                            err_str = str(exc)
+                            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                                # Trigger 30-minute lockout to avoid spamming the exhausted quota
+                                self.budget_mgr.trigger_rate_limit_lockout(1800)
+                                self.alert_status = f"[yellow]Quota Cap Hit (Backing off 30m) | {self.budget_mgr.get_status_str()}[/yellow]"
+                            else:
+                                err_detail = getattr(exc, "code", None) or err_str[:25]
+                                self.alert_status = f"[red]Inference error: {err_detail}[/red]"
 
                     elif self.latest_analysis is None or (now - self.last_gemini_call > 60):
                         self.latest_analysis = self._generate_rule_based_synthesis(cvd_metrics, vp_metrics)
+                        budget_info = self.budget_mgr.get_status_str()
                         if not is_outside_va:
-                            self.alert_status = "Consolidating within Value Area"
+                            self.alert_status = f"Inside Value Area | {budget_info}"
+                        else:
+                            self.alert_status = f"Monitoring Outside VA | {budget_msg} | {budget_info}"
 
                 live.update(
                     DashboardUI.render(
                         cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
                     )
+                )
+                if now - self.last_snapshot_export >= 300:  # Every 5 minutes
+                self.last_snapshot_export = now
+                DashboardUI.export_snapshot(
+                    cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
                 )
 
 def main():

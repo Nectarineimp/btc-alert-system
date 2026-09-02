@@ -7,8 +7,48 @@ from rich.align import Align
 from btc_alert.analytics.cvd import CVDMetrics
 from btc_alert.analytics.volume_profile import VolumeProfileMetrics
 from btc_alert.reasoning.schemas import MicrostructureAnalysis
+import json
+import time
+from pathlib import Path
+from rich.console import Console
 
 class DashboardUI:
+    @classmethod
+    def export_snapshot(
+        cls,
+        cvd,
+        vp,
+        analysis,
+        status_msg: str,
+        ticks_count: int,
+        output_dir: str = "web_export"
+    ):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        
+        # 1. Render crisp vector SVG
+        record_console = Console(record=True, width=110, height=26)
+        layout = cls.render(cvd, vp, analysis, status_msg, ticks_count)
+        record_console.print(layout)
+        record_console.save_svg(f"{output_dir}/microstructure.svg", title="BTC Microstructure Monitor")
+
+        # 2. Save companion JSON
+        data = {
+            "timestamp": int(time.time()),
+            "price": cvd.latest_price,
+            "poc": vp.poc_price,
+            "vah": vp.vah_price,
+            "val": vp.val_price,
+            "spot_cvd": cvd.spot_cvd_delta,
+            "perp_cvd": cvd.perp_cvd_delta,
+            "divergence": cvd.cvd_divergence,
+            "regime": analysis.regime if analysis else "Consolidation",
+            "uncertainty": analysis.uncertainty_level if analysis else "High",
+            "summary": analysis.verbal_summary if analysis else "",
+            "risk": analysis.key_risk_factor if analysis else "",
+        }
+        with open(f"{output_dir}/latest_regime.json", "w") as f:
+            json.dump(data, f, indent=2)
+
     @staticmethod
     def render(
         cvd: CVDMetrics,
