@@ -12,11 +12,14 @@ from btc_alert.reasoning.schemas import MicrostructureAnalysis
 from btc_alert.reasoning.budget_manager import InferenceBudgetManager
 from btc_alert.alerts.whatsapp import WhatsAppNotifier
 from btc_alert.ui.dashboard import DashboardUI
+from btc_alert.alerts.git_syncer import GitSyncer
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
 class BTCMicrostructureDaemon:
     def __init__(self):
+        # if the BTCSunrise repository is moved, you need to update this line.
+        self.git_syncer = GitSyncer(repo_path="/mnt/c/Users/manra/var/BTCSunrise")
         self.last_snapshot_export: float = 0.0
         self.stream_client = MultiExchangeStreamClient()
         self.cvd_tracker = RollingCVDTracker(window_seconds=config.ROLLING_WINDOW_MINUTES * 60)
@@ -76,11 +79,11 @@ class BTCMicrostructureDaemon:
         msg = (
             f"⚡ *BTC ORDER FLOW BREAKOUT*\n\n"
             f"*Regime:* {analysis.regime}\n"
-            f"*Price:* ${cvd.latest_price:,.2f}\n"
+            f"*Price:* {cvd.latest_price:,.2f} USD\n"
             f"*Spot CVD:* {cvd.spot_cvd_delta:+,.2f} BTC\n"
             f"*Perp CVD:* {cvd.perp_cvd_delta:+,.2f} BTC\n"
             f"*Divergence:* {cvd.cvd_divergence:+,.2f} BTC\n"
-            f"*POC:* ${vp.poc_price:,.2f} | *VAH:* ${vp.vah_price:,.2f} | *VAL:* ${vp.val_price:,.2f}\n\n"
+            f"*POC:* {vp.poc_price:,.2f} USD | *VAH:* {vp.vah_price:,.2f} USD | *VAL:* {vp.val_price:,.2f} USD\n\n"
             f"*Analysis:* {analysis.verbal_summary}\n\n"
             f"*Key Risk:* {analysis.key_risk_factor}"
         )
@@ -151,11 +154,18 @@ class BTCMicrostructureDaemon:
                             ):
                                 self.last_alert_sent = now
                                 self.last_alert_regime = self.latest_analysis.regime
+                                
+                                # 1. Dispatch WhatsApp notification
                                 asyncio.create_task(self._format_and_dispatch_alert(cvd_metrics, vp_metrics, self.latest_analysis))
-                                # Export snapshot to website repository folder
+                                
+                                # 2. Write new SVG and JSON snapshot to disk
                                 DashboardUI.export_snapshot(
                                     cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
                                 )
+                                
+                                # 3. Push updates to the Git repository
+                                asyncio.create_task(self.git_syncer.push_updates("alert: high conviction breakout"))
+                                
                                 self.alert_status = f"[bold green]ALERT DISPATCHED ({self.latest_analysis.regime})[/bold green]"
                             else:
                                 self.alert_status = f"Tracking ({self.latest_analysis.regime}) | {self.budget_mgr.get_status_str()}"
@@ -185,8 +195,13 @@ class BTCMicrostructureDaemon:
                 if now - self.last_snapshot_export >= 300:  # Every 5 minutes
                     self.last_snapshot_export = now
                     DashboardUI.export_snapshot(
-                        cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
+                        cvd_metrics,
+                        vp_metrics,
+                        self.latest_analysis,
+                        self.alert_status,
+                        self.ticks_count
                     )
+                    asyncio.create_task(self.git_syncer.push_updates())
 
 def main():
     daemon = BTCMicrostructureDaemon()
