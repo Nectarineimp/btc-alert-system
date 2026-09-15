@@ -19,7 +19,7 @@ logging.getLogger().setLevel(logging.CRITICAL)
 class BTCMicrostructureDaemon:
     def __init__(self):
         # if the BTCSunrise repository is moved, you need to update this line.
-        self.git_syncer = GitSyncer(repo_path="/mnt/c/Users/manra/var/BTCSunrise")
+        self.git_syncer = GitSyncer(repo_path="~/projects/BTCSunrise-datashare")
         self.last_snapshot_export: float = 0.0
         self.stream_client = MultiExchangeStreamClient()
         self.cvd_tracker = RollingCVDTracker(window_seconds=config.ROLLING_WINDOW_MINUTES * 60)
