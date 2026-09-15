@@ -1,38 +1,64 @@
-from datetime import datetime
+import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from rich.align import Align
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.align import Align
+
 from btc_alert.analytics.cvd import CVDMetrics
 from btc_alert.analytics.volume_profile import VolumeProfileMetrics
+from btc_alert.exporters.html_exporter import AlertSnippetExporter
 from btc_alert.reasoning.schemas import MicrostructureAnalysis
-import json
-import time
-from pathlib import Path
-from rich.console import Console
+
 
 class DashboardUI:
+    _exporter: AlertSnippetExporter | None = None
+
+    @classmethod
+    def get_exporter(cls) -> AlertSnippetExporter:
+        if cls._exporter is None:
+            datashare_path = Path.home() / "projects" / "BTCSunrise-datashare"
+            cls._exporter = AlertSnippetExporter(
+                datashare_dir=datashare_path,
+                auto_git_push=False,  # GitSyncer handles git pushes in main.py
+            )
+        return cls._exporter
+
     @classmethod
     def export_snapshot(
         cls,
-        cvd,
-        vp,
-        analysis,
+        cvd: CVDMetrics,
+        vp: VolumeProfileMetrics,
+        analysis: MicrostructureAnalysis | None,
         status_msg: str,
         ticks_count: int,
-        output_dir: str = "web_export"
+        output_dir: str = "web_export",
     ):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # 1. Render crisp vector SVG
-        record_console = Console(record=True, width=110, height=26)
-        layout = cls.render(cvd, vp, analysis, status_msg, ticks_count)
-        record_console.print(layout)
-        record_console.save_svg(f"{output_dir}/microstructure.svg", title="BTC Microstructure Monitor")
 
-        # 2. Save companion JSON
-        data = {
+        # 1. Structured HTML & JSON Export to BTCSunrise-datashare
+        exporter = cls.get_exporter()
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": float(cvd.latest_price),
+            "regime": analysis.regime if analysis else "Consolidation",
+            "spot_cvd": float(cvd.spot_cvd_delta),
+            "perp_cvd": float(cvd.perp_cvd_delta),
+            "divergence": float(cvd.cvd_divergence),
+            "poc": float(vp.poc_price),
+            "vah": float(vp.vah_price),
+            "val": float(vp.val_price),
+            "analysis": analysis.verbal_summary if analysis else "",
+            "key_risk": analysis.key_risk_factor if analysis else "",
+        }
+        exporter.export(payload)
+
+        # 2. Local legacy json export in web_export/
+        local_data = {
             "timestamp": int(time.time()),
             "price": cvd.latest_price,
             "poc": vp.poc_price,
@@ -47,7 +73,7 @@ class DashboardUI:
             "risk": analysis.key_risk_factor if analysis else "",
         }
         with open(f"{output_dir}/latest_regime.json", "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(local_data, f, indent=2)
 
     @staticmethod
     def render(
@@ -55,27 +81,34 @@ class DashboardUI:
         vp: VolumeProfileMetrics,
         analysis: MicrostructureAnalysis | None,
         last_alert_msg: str,
-        ticks_processed: int
+        ticks_processed: int,
     ) -> Layout:
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="narrative", size=7),
-            Layout(name="body")
+            Layout(name="body"),
         )
         layout["body"].split_row(
             Layout(name="left_metrics", ratio=3),
-            Layout(name="right_status", ratio=2)
+            Layout(name="right_status", ratio=2),
         )
 
         # 1. Header
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header_text = Text(f"⚡ BTC MICROSTRUCTURE DAEMON | {now_str} | Ticks: {ticks_processed:,}", style="bold white on blue")
+        header_text = Text(
+            f"⚡ BTC MICROSTRUCTURE DAEMON | {now_str} | Ticks: {ticks_processed:,}",
+            style="bold white on blue",
+        )
         layout["header"].update(Panel(Align.center(header_text), style="blue"))
 
         # 2. Gemini Narrative Panel
         if analysis:
-            color = "green" if analysis.uncertainty_level == "Low" else ("yellow" if analysis.uncertainty_level == "Medium" else "red")
+            color = (
+                "green"
+                if analysis.uncertainty_level == "Low"
+                else ("yellow" if analysis.uncertainty_level == "Medium" else "red")
+            )
             narrative_body = (
                 f"[bold cyan]Regime:[/bold cyan] [{color}]{analysis.regime}[/{color}]  |  "
                 f"[bold cyan]Uncertainty:[/bold cyan] [{color}]{analysis.uncertainty_level}[/{color}]\n"
@@ -85,7 +118,13 @@ class DashboardUI:
         else:
             narrative_body = "[dim yellow]Aggregating order flow... Awaiting initial Gemini synthesis.[/dim yellow]"
 
-        layout["narrative"].update(Panel(narrative_body, title="[bold magenta]Gemini Microstructure Synthesis[/bold magenta]", border_style="magenta"))
+        layout["narrative"].update(
+            Panel(
+                narrative_body,
+                title="[bold magenta]Gemini Microstructure Synthesis[/bold magenta]",
+                border_style="magenta",
+            )
+        )
 
         # 3. Left Table: Microstructure Order Flow Metrics
         table = Table(expand=True, box=None)
@@ -101,10 +140,18 @@ class DashboardUI:
         table.add_row("Perp CVD (60m)", f"[{perp_color}]{cvd.perp_cvd_delta:+,.4f} BTC[/{perp_color}]")
         table.add_row("CVD Divergence", f"[{div_color}]{cvd.cvd_divergence:+,.4f} BTC[/{div_color}]")
         table.add_row("Point of Control (POC)", f"${vp.poc_price:,.2f}")
-        table.add_row("Value Area High (VAH)", f"${vp.vah_price:,.2f} {'[green](Above)[/green]' if vp.is_above_vah else ''}")
-        table.add_row("Value Area Low (VAL)", f"${vp.val_price:,.2f} {'[red](Below)[/red]' if vp.is_below_val else ''}")
+        table.add_row(
+            "Value Area High (VAH)",
+            f"${vp.vah_price:,.2f} {'[green](Above)[/green]' if vp.is_above_vah else ''}",
+        )
+        table.add_row(
+            "Value Area Low (VAL)",
+            f"${vp.val_price:,.2f} {'[red](Below)[/red]' if vp.is_below_val else ''}",
+        )
 
-        layout["left_metrics"].update(Panel(table, title="[bold cyan]Order Flow & Volume Profile[/bold cyan]", border_style="cyan"))
+        layout["left_metrics"].update(
+            Panel(table, title="[bold cyan]Order Flow & Volume Profile[/bold cyan]", border_style="cyan")
+        )
 
         # 4. Right Status Panel
         status_text = (
@@ -113,6 +160,8 @@ class DashboardUI:
             f"[bold green]Perp Volume:[/bold green] {cvd.perp_volume:,.2f} BTC\n\n"
             f"[bold yellow]Alert Gateway:[/bold yellow]\n{last_alert_msg}"
         )
-        layout["right_status"].update(Panel(status_text, title="[bold yellow]System Status[/bold yellow]", border_style="yellow"))
+        layout["right_status"].update(
+            Panel(status_text, title="[bold yellow]System Status[/bold yellow]", border_style="yellow")
+        )
 
         return layout
