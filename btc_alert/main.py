@@ -43,8 +43,8 @@ class BTCMicrostructureDaemon:
         self.inference_cooldown: int = 180      # 3 minutes between LLM inferences during breakouts
         self.whatsapp_cooldown: int = 1200      # 20 minutes between phone notifications
         self.min_warmup_seconds: int = 180      # 3 minutes warmup on startup
-        self.min_volume_threshold: float = 75.0 # Require 75 BTC traded in 60m window
-        self.min_cvd_divergence: float = 20.0   # Require 20 BTC delta divergence
+        self.min_volume_threshold: float = 30.0 # Require 30 BTC traded in 60m window
+        self.min_cvd_divergence: float = 10.0   # Require 10 BTC delta divergence
 
     def _generate_rule_based_synthesis(
         self, cvd: CVDMetrics, vp: VolumeProfileMetrics
@@ -148,9 +148,9 @@ class BTCMicrostructureDaemon:
                             self.budget_mgr.record_call()
 
                             if (
-                                self.latest_analysis.uncertainty_level == "Low"
+                                self.latest_analysis.uncertainty_level == ["Low", "medium"]
                                 and (now - self.last_alert_sent >= self.whatsapp_cooldown)
-                                and (self.latest_analysis.regime != self.last_alert_regime)
+                                # (removing this as a constraint) and (self.latest_analysis.regime != self.last_alert_regime)
                             ):
                                 self.last_alert_sent = now
                                 self.last_alert_regime = self.latest_analysis.regime
