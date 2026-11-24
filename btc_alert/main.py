@@ -76,6 +76,21 @@ class BTCMicrostructureDaemon:
             key_risk_factor=f"Mean-reversion trap back toward Value Area POC (${vp.poc_price:,.2f})."
         )
 
+    async def _format_and_dispatch_alert(self, cvd: CVDMetrics, vp: VolumeProfileMetrics, analysis: MicrostructureAnalysis):
+        """Constructs the high-conviction WhatsApp payload with verified float formatting."""
+        msg = (
+            f"⚡ *BTC ORDER FLOW BREAKOUT*\n\n"
+            f"*Regime:* {analysis.regime}\n"
+            f"*Price:* {cvd.latest_price:,.2f} USD\n"
+            f"*Spot CVD:* {cvd.spot_cvd_delta:+,.2f} BTC\n"
+            f"*Perp CVD:* {cvd.perp_cvd_delta:+,.2f} BTC\n"
+            f"*Divergence:* {cvd.cvd_divergence:+,.2f} BTC\n"
+            f"*POC:* {vp.poc_price:,.2f} USD | *VAH:* {vp.vah_price:,.2f} USD | *VAL:* {vp.val_price:,.2f} USD\n\n"
+            f"*Analysis:* {analysis.verbal_summary}\n\n"
+            f"*Key Risk:* {analysis.key_risk_factor}"
+        )
+        await self.notifier.send_alert(msg)
+
     async def _format_and_dispatch_rsi_alert(self, rsi: RSIMetrics):
         """Dispatches the daily 16:00 ET Wilder RSI close alert via WhatsApp."""
         msg = (
@@ -83,23 +98,6 @@ class BTCMicrostructureDaemon:
             f"*Date:* {rsi.last_close_date_et}\n"
             f"*16:00 ET Close:* ${rsi.last_close_price:,.2f}\n"
             f"*14d Wilder RSI:* {rsi.finalized_rsi:.2f} ({rsi.label.upper()})\n"
-            f"*24h Delta:* {rsi.rsi_delta:+.2f}"
-        )
-        await self.notifier.send_alert(msg)
-
-    async def _format_and_dispatch_rsi_alert(self, rsi: RSIMetrics):
-        """Dispatches the daily 16:00 ET Wilder RSI close alert via WhatsApp."""
-        zone = (
-            "EXTREME OVERSOLD" if rsi.finalized_rsi < 20
-            else "OVERSOLD" if rsi.finalized_rsi < 30
-            else "OVERBOUGHT" if rsi.finalized_rsi > 70
-            else "NEUTRAL"
-        )
-        msg = (
-            f"📊 *BTC DAILY RSI CLOSE (16:00 ET)*\n\n"
-            f"*Date:* {rsi.last_close_date_et}\n"
-            f"*16:00 ET Close:* ${rsi.last_close_price:,.2f}\n"
-            f"*14d Wilder RSI:* {rsi.finalized_rsi:.2f} ({zone})\n"
             f"*24h Delta:* {rsi.rsi_delta:+.2f}"
         )
         await self.notifier.send_alert(msg)
