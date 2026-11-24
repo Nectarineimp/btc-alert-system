@@ -4,6 +4,7 @@ import logging
 from rich.live import Live
 
 from btc_alert.config import config
+from btc_alert.analytics.rsi import DailyRSITracker, RSIMetrics
 from btc_alert.ingestion.websocket_client import MultiExchangeStreamClient
 from btc_alert.analytics.cvd import RollingCVDTracker, CVDMetrics
 from btc_alert.analytics.volume_profile import RollingVolumeProfile, VolumeProfileMetrics
@@ -18,6 +19,7 @@ logging.getLogger().setLevel(logging.CRITICAL)
 
 class BTCMicrostructureDaemon:
     def __init__(self):
+        self.rsi_tracker = DailyRSITracker(period=14, warmup_days=250)
         # if the BTCSunrise repository is moved, you need to update this line.
         self.git_syncer = GitSyncer(repo_path="~/projects/BTCSunrise-datashare")
         self.last_snapshot_export: float = 0.0
@@ -74,22 +76,39 @@ class BTCMicrostructureDaemon:
             key_risk_factor=f"Mean-reversion trap back toward Value Area POC (${vp.poc_price:,.2f})."
         )
 
-    async def _format_and_dispatch_alert(self, cvd: CVDMetrics, vp: VolumeProfileMetrics, analysis: MicrostructureAnalysis):
-        """Constructs the high-conviction WhatsApp payload with verified float formatting."""
+    async def _format_and_dispatch_rsi_alert(self, rsi: RSIMetrics):
+        """Dispatches the daily 16:00 ET Wilder RSI close alert via WhatsApp."""
         msg = (
-            f"⚡ *BTC ORDER FLOW BREAKOUT*\n\n"
-            f"*Regime:* {analysis.regime}\n"
-            f"*Price:* {cvd.latest_price:,.2f} USD\n"
-            f"*Spot CVD:* {cvd.spot_cvd_delta:+,.2f} BTC\n"
-            f"*Perp CVD:* {cvd.perp_cvd_delta:+,.2f} BTC\n"
-            f"*Divergence:* {cvd.cvd_divergence:+,.2f} BTC\n"
-            f"*POC:* {vp.poc_price:,.2f} USD | *VAH:* {vp.vah_price:,.2f} USD | *VAL:* {vp.val_price:,.2f} USD\n\n"
-            f"*Analysis:* {analysis.verbal_summary}\n\n"
-            f"*Key Risk:* {analysis.key_risk_factor}"
+            f"📊 *BTC DAILY RSI CLOSE (16:00 ET)*\n\n"
+            f"*Date:* {rsi.last_close_date_et}\n"
+            f"*16:00 ET Close:* ${rsi.last_close_price:,.2f}\n"
+            f"*14d Wilder RSI:* {rsi.finalized_rsi:.2f} ({rsi.label.upper()})\n"
+            f"*24h Delta:* {rsi.rsi_delta:+.2f}"
+        )
+        await self.notifier.send_alert(msg)
+
+    async def _format_and_dispatch_rsi_alert(self, rsi: RSIMetrics):
+        """Dispatches the daily 16:00 ET Wilder RSI close alert via WhatsApp."""
+        zone = (
+            "EXTREME OVERSOLD" if rsi.finalized_rsi < 20
+            else "OVERSOLD" if rsi.finalized_rsi < 30
+            else "OVERBOUGHT" if rsi.finalized_rsi > 70
+            else "NEUTRAL"
+        )
+        msg = (
+            f"📊 *BTC DAILY RSI CLOSE (16:00 ET)*\n\n"
+            f"*Date:* {rsi.last_close_date_et}\n"
+            f"*16:00 ET Close:* ${rsi.last_close_price:,.2f}\n"
+            f"*14d Wilder RSI:* {rsi.finalized_rsi:.2f} ({zone})\n"
+            f"*24h Delta:* {rsi.rsi_delta:+.2f}"
         )
         await self.notifier.send_alert(msg)
 
     async def run(self):
+        # Warm up 14d Wilder RSI (16:00 ET) before launching the live TUI
+        await self.rsi_tracker.warmup()
+        initial_rsi = self.rsi_tracker.get_metrics(0.0)
+
         with Live(
             DashboardUI.render(
                 self.cvd_tracker.get_metrics(),
@@ -97,6 +116,7 @@ class BTCMicrostructureDaemon:
                 None,
                 self.alert_status,
                 0,
+                initial_rsi,
             ),
             refresh_per_second=4,
             screen=True,
@@ -110,6 +130,18 @@ class BTCMicrostructureDaemon:
                 cvd_metrics = self.cvd_tracker.get_metrics()
                 vp_metrics = self.vp_tracker.compute_profile(cvd_metrics.latest_price)
 
+                # Check for 16:00 ET Daily RSI rollover (fires once per calendar day)
+                finalized_rsi = self.rsi_tracker.check_and_finalize_close(cvd_metrics.latest_price)
+                rsi_metrics = finalized_rsi or self.rsi_tracker.get_metrics(cvd_metrics.latest_price)
+
+                if finalized_rsi is not None:
+                    asyncio.create_task(self._format_and_dispatch_rsi_alert(finalized_rsi))
+                    DashboardUI.export_snapshot(
+                        cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count, rsi_metrics
+                    )
+                    asyncio.create_task(self.git_syncer.push_updates("alert: 16:00 ET daily RSI close"))
+                    self.alert_status = f"[bold cyan]16:00 ET RSI LOCKED ({finalized_rsi.finalized_rsi:.2f} | {finalized_rsi.rsi_delta:+.2f})[/bold cyan]"
+
                 if self.ticks_count > 50:
                     total_vol = cvd_metrics.spot_volume + cvd_metrics.perp_volume
                     is_outside_va = vp_metrics.is_above_vah or vp_metrics.is_below_val
@@ -120,7 +152,6 @@ class BTCMicrostructureDaemon:
 
                     budget_allowed, budget_msg = self.budget_mgr.can_call()
 
-                    # Only run inference if BOTH quantitative trigger and budget permit
                     if is_outside_va and has_warmup and has_volume and has_divergence and cooldown_ready and budget_allowed:
                         self.last_gemini_call = now
                         self.alert_status = f"[bold yellow]Evaluating Breakout... ({self.budget_mgr.get_status_str()})[/bold yellow]"
@@ -137,6 +168,10 @@ class BTCMicrostructureDaemon:
                             "cvd_divergence": cvd_metrics.cvd_divergence,
                             f"spot_volume_{config.ROLLING_WINDOW_MINUTES}m": cvd_metrics.spot_volume,
                             f"perp_volume_{config.ROLLING_WINDOW_MINUTES}m": cvd_metrics.perp_volume,
+                            "daily_rsi_16et": rsi_metrics.finalized_rsi,
+                            "daily_rsi_delta": rsi_metrics.rsi_delta,
+                            "provisional_rsi": rsi_metrics.provisional_rsi,
+                            "daily_rsi_zone": rsi_metrics.label,
                         }
 
                         try:
@@ -144,35 +179,29 @@ class BTCMicrostructureDaemon:
                             self.latest_analysis = await loop.run_in_executor(
                                 None, self.reasoning_engine.evaluate_market, payload
                             )
-                            # Record successful call in budget tracker
                             self.budget_mgr.record_call()
 
+                            # FIXED: 'in ("Low", "Medium")' instead of '== ["Low", "medium"]'
                             if (
-                                self.latest_analysis.uncertainty_level == ["Low", "medium"]
+                                self.latest_analysis.uncertainty_level in ("Low", "Medium")
                                 and (now - self.last_alert_sent >= self.whatsapp_cooldown)
-                                # (removing this as a constraint) and (self.latest_analysis.regime != self.last_alert_regime)
                             ):
                                 self.last_alert_sent = now
                                 self.last_alert_regime = self.latest_analysis.regime
-                                
-                                # 1. Dispatch WhatsApp notification
+
                                 asyncio.create_task(self._format_and_dispatch_alert(cvd_metrics, vp_metrics, self.latest_analysis))
-                                
-                                # 2. Write new SVG and JSON snapshot to disk
+
                                 DashboardUI.export_snapshot(
-                                    cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
+                                    cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count, rsi_metrics
                                 )
-                                
-                                # 3. Push updates to the Git repository
+
                                 asyncio.create_task(self.git_syncer.push_updates("alert: high conviction breakout"))
-                                
                                 self.alert_status = f"[bold green]ALERT DISPATCHED ({self.latest_analysis.regime})[/bold green]"
                             else:
                                 self.alert_status = f"Tracking ({self.latest_analysis.regime}) | {self.budget_mgr.get_status_str()}"
                         except Exception as exc:
                             err_str = str(exc)
                             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                                # Trigger 30-minute lockout to avoid spamming the exhausted quota
                                 self.budget_mgr.trigger_rate_limit_lockout(1800)
                                 self.alert_status = f"[yellow]Quota Cap Hit (Backing off 30m) | {self.budget_mgr.get_status_str()}[/yellow]"
                             else:
@@ -189,7 +218,7 @@ class BTCMicrostructureDaemon:
 
                 live.update(
                     DashboardUI.render(
-                        cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count
+                        cvd_metrics, vp_metrics, self.latest_analysis, self.alert_status, self.ticks_count, rsi_metrics
                     )
                 )
                 if now - self.last_snapshot_export >= 300:  # Every 5 minutes
@@ -199,7 +228,8 @@ class BTCMicrostructureDaemon:
                         vp_metrics,
                         self.latest_analysis,
                         self.alert_status,
-                        self.ticks_count
+                        self.ticks_count,
+                        rsi_metrics,
                     )
                     asyncio.create_task(self.git_syncer.push_updates())
 

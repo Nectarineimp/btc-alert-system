@@ -14,6 +14,8 @@ from btc_alert.analytics.volume_profile import VolumeProfileMetrics
 from btc_alert.exporters.html_exporter import AlertSnippetExporter
 from btc_alert.reasoning.schemas import MicrostructureAnalysis
 
+from btc_alert.analytics.rsi import RSIMetrics
+
 
 class DashboardUI:
     _exporter: AlertSnippetExporter | None = None
@@ -36,11 +38,11 @@ class DashboardUI:
         analysis: MicrostructureAnalysis | None,
         status_msg: str,
         ticks_count: int,
+        rsi: RSIMetrics | None = None,
         output_dir: str = "web_export",
     ):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-        # 1. Structured HTML & JSON Export to BTCSunrise-datashare
         exporter = cls.get_exporter()
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -52,12 +54,16 @@ class DashboardUI:
             "poc": float(vp.poc_price),
             "vah": float(vp.vah_price),
             "val": float(vp.val_price),
+            "daily_rsi": float(rsi.finalized_rsi) if (rsi and rsi.is_warmed_up) else None,
+            "rsi_delta": float(rsi.rsi_delta) if (rsi and rsi.is_warmed_up) else None,
+            "provisional_rsi": float(rsi.provisional_rsi) if (rsi and rsi.is_warmed_up) else None,
+            "rsi_close_date_et": rsi.last_close_date_et if (rsi and rsi.is_warmed_up) else None,
             "analysis": analysis.verbal_summary if analysis else "",
             "key_risk": analysis.key_risk_factor if analysis else "",
+            "rsi_label": rsi.label if (rsi and rsi.is_warmed_up) else None,
         }
         exporter.export(payload)
 
-        # 2. Local legacy json export in web_export/
         local_data = {
             "timestamp": int(time.time()),
             "price": cvd.latest_price,
@@ -67,13 +73,18 @@ class DashboardUI:
             "spot_cvd": cvd.spot_cvd_delta,
             "perp_cvd": cvd.perp_cvd_delta,
             "divergence": cvd.cvd_divergence,
+            "daily_rsi": rsi.finalized_rsi if (rsi and rsi.is_warmed_up) else None,
+            "rsi_delta": rsi.rsi_delta if (rsi and rsi.is_warmed_up) else None,
+            "provisional_rsi": rsi.provisional_rsi if (rsi and rsi.is_warmed_up) else None,
             "regime": analysis.regime if analysis else "Consolidation",
             "uncertainty": analysis.uncertainty_level if analysis else "High",
             "summary": analysis.verbal_summary if analysis else "",
             "risk": analysis.key_risk_factor if analysis else "",
+            "rsi_label": rsi.label if (rsi and rsi.is_warmed_up) else None,
         }
         with open(f"{output_dir}/latest_regime.json", "w") as f:
             json.dump(local_data, f, indent=2)
+
 
     @staticmethod
     def render(
@@ -82,6 +93,7 @@ class DashboardUI:
         analysis: MicrostructureAnalysis | None,
         last_alert_msg: str,
         ticks_processed: int,
+        rsi: RSIMetrics | None = None,
     ) -> Layout:
         layout = Layout()
         layout.split_column(
@@ -153,6 +165,31 @@ class DashboardUI:
             Panel(table, title="[bold cyan]Order Flow & Volume Profile[/bold cyan]", border_style="cyan")
         )
 
+        if rsi and rsi.is_warmed_up:
+            rsi_val = rsi.finalized_rsi
+            rsi_color = (
+                "bold green" if rsi_val < 20
+                else "green" if rsi_val < 30
+                else "yellow" if rsi_val < 45
+                else "white" if rsi_val <= 55
+                else "cyan" if rsi_val <= 70
+                else "red" if rsi_val <= 80
+                else "bold red"
+            )
+            delta_color = "green" if rsi.rsi_delta >= 0 else "red"
+            table.add_row(
+                "Daily RSI (16:00 ET)",
+                f"[{rsi_color}]{rsi.finalized_rsi:.2f}[/{rsi_color}] "
+                f"[{delta_color}]({rsi.rsi_delta:+.2f})[/{delta_color}] "
+                f"[dim]| Live: {rsi.provisional_rsi:.2f}[/dim]",
+            )
+            table.add_row(
+                "RSI Zone",
+                f"[{rsi_color}]{rsi.label}[/{rsi_color}]",
+            )
+        else:
+            table.add_row("Daily RSI (16:00 ET)", "[dim]Warming up...[/dim]")
+            
         # 4. Right Status Panel
         status_text = (
             f"[bold green]Daemon:[/bold green] Active (WebSockets Streaming)\n"

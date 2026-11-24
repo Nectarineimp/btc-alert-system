@@ -58,6 +58,29 @@ class AlertSnippetExporter:
         key_risk = data.get("key_risk", "")
         ts = data.get("timestamp", datetime.now(timezone.utc).isoformat())
 
+        daily_rsi = data.get("daily_rsi")
+        rsi_delta = data.get("rsi_delta")
+        provisional_rsi = data.get("provisional_rsi")
+        rsi_label = data.get("rsi_label")
+
+        if daily_rsi is not None and rsi_delta is not None:
+            delta_sign = "+" if rsi_delta >= 0 else ""
+            delta_cls = "btc-pos" if rsi_delta >= 0 else "btc-neg"
+            zone_cls = "btc-pos" if daily_rsi < 30 else ("btc-neg" if daily_rsi > 70 else "")
+            live_str = f" (Live: {provisional_rsi:.2f})" if provisional_rsi is not None else ""
+            rsi_html_row = (
+                f'<span class="btc-alert-label">Daily RSI (16:00 ET)</span>'
+                f'<span class="btc-alert-val">{daily_rsi:.2f} '
+                f'<span class="{delta_cls}">({delta_sign}{rsi_delta:.2f})</span>{live_str}</span>'
+            )
+            if rsi_label:
+                rsi_html_row += (
+                    f'\n    <span class="btc-alert-label">RSI Zone</span>'
+                    f'<span class="btc-alert-val {zone_cls}">{rsi_label}</span>'
+                )
+        else:
+            rsi_html_row = ""
+
         def fmt_cvd(val: float) -> str:
             sign = "+" if val > 0 else ""
             return f"{sign}{val:,.2f} BTC"
@@ -147,6 +170,8 @@ class AlertSnippetExporter:
 
     <span class="btc-alert-label">POC | VAH | VAL</span>
     <span class="btc-alert-val">{poc:,.0f} | {vah:,.0f} | {val:,.0f} USD</span>
+
+    {rsi_html_row}
   </div>
 
   <div class="btc-alert-body">
